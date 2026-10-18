@@ -620,3 +620,47 @@ fn a_pdf_without_annotations_has_no_links_but_the_same_pages() {
         assert!(!has_link_markup(&bytes));
     }
 }
+
+/// The (r, g, b) operands of every `rg` fill-colour operator in the PDF's decoded content streams.
+fn rgb_fills(bytes: &[u8]) -> Vec<(f64, f64, f64)> {
+    use hayro_syntax::object::Object;
+    let pdf = hayro_syntax::Pdf::new(bytes.to_vec()).expect("pdf");
+    let mut out = Vec::new();
+    for obj in pdf.objects() {
+        let Object::Stream(s) = obj else { continue };
+        let Ok(data) = s.decoded() else { continue };
+        let text = String::from_utf8_lossy(&data);
+        let tokens: Vec<&str> = text.split_whitespace().collect();
+        for (i, t) in tokens.iter().enumerate() {
+            if *t == "rg" && i >= 3 {
+                let n: Vec<Option<f64>> = tokens[i - 3..i].iter().map(|v| v.parse().ok()).collect();
+                if let [Some(r), Some(g), Some(b)] = n[..] {
+                    out.push((r, g, b));
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn a_grayscale_notes_page_has_no_coloured_master_text() {
+    use deckcraft_model::text::{Run, RunProps};
+    use deckcraft_model::{PhType, Rgba};
+    let mut p = deck(1);
+    p.notes_size = deckcraft_model::Size::new(612.0, 792.0);
+    let mut header = ph(PhType::Header, 0.0, 0.0, 300.0, 80.0, "");
+    if let Some(para) = header.text.as_mut().and_then(|t| t.paragraphs.first_mut()) {
+        let fill = deckcraft_model::Fill::solid(deckcraft_model::ColorRef::rgb(Rgba::rgb(200, 0, 0)));
+        para.runs = vec![Run::with("Confidential header", RunProps { size: Some(18.0), fill: Some(fill), ..Default::default() })];
+    }
+    p.notes_master = Some(Arc::new(deckcraft_model::Master { shapes: vec![header], ..Default::default() }));
+    let coloured = |f: &[(f64, f64, f64)]| f.iter().any(|(r, g, b)| r != g || g != b);
+    let plain = rgb_fills(&export(&p, &opts(PageLayout::Notes)).unwrap());
+    assert!(coloured(&plain), "the plain export fills the header red: {plain:?}");
+    for layout in [PageLayout::Notes, PageLayout::Handouts { per_page: 4 }] {
+        let fills = rgb_fills(&export(&p, &PdfOptions { grayscale: true, ..opts(layout) }).unwrap());
+        assert!(!coloured(&fills), "{layout:?}: {fills:?}");
+    }
+}

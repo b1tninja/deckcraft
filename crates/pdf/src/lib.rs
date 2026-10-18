@@ -537,8 +537,15 @@ impl Exporter<'_> {
             s.push_transform(&tf(view * pt.transform * Affine::translate((x0, y0))));
             s.set_fill(Some(if visible {
                 let c = run.color;
+                // The same conversion as the artwork, so a theme-coloured header stays gray in a gray PDF.
+                let (r, g, b) = if self.opts.grayscale {
+                    let y = deckcraft_render::gray_of(c.r, c.g, c.b);
+                    (y, y, y)
+                } else {
+                    (c.r, c.g, c.b)
+                };
                 Fill {
-                    paint: krilla::color::rgb::Color::new(c.r, c.g, c.b).into(),
+                    paint: krilla::color::rgb::Color::new(r, g, b).into(),
                     opacity: NormalizedF32::new((f64::from(c.a) / 255.0 * run.alpha) as f32).unwrap_or(NormalizedF32::ONE),
                     ..Default::default()
                 }
