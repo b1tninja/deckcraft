@@ -583,6 +583,44 @@ fn a_grayscale_export_has_only_gray_artwork() {
     }
 }
 
+/// A coloured background (the backdrop raster) and a coloured shape (the content raster).
+fn red_slide_with_blue_shape() -> Presentation {
+    let mut p = red_slide();
+    Arc::make_mut(&mut p.slides[0]).shapes.push(deckcraft_model::Shape {
+        id: deckcraft_model::ShapeId(9003),
+        xfrm: Some(deckcraft_model::Xfrm::new(20.0, 20.0, 400.0, 300.0)),
+        fill: Some(deckcraft_model::Fill::solid(deckcraft_model::ColorRef::rgb(deckcraft_model::Rgba::rgb(30, 60, 220)))),
+        ..Default::default()
+    });
+    p
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn a_grayscale_export_is_gray_in_both_the_backdrop_and_the_content_layer() {
+    let p = red_slide_with_blue_shape();
+    let coloured = |px: &[u8]| px.as_chunks::<3>().0.iter().any(|c| c[0] != c[1] || c[1] != c[2]);
+    let reddish = |px: &[u8]| px.as_chunks::<3>().0.iter().any(|c| c[0] > 150 && c[1] < 80);
+    let bluish = |px: &[u8]| px.as_chunks::<3>().0.iter().any(|c| c[2] > 150 && c[0] < 80);
+
+    // Control: the plain export keeps both layers' colour, one image each.
+    let plain = rgb_images(&export(&p, &opts(PageLayout::Slides)).unwrap());
+    assert!(plain.len() >= 2, "backdrop and content are two images: {}", plain.len());
+    assert!(plain.iter().any(|(_, _, px)| reddish(px)), "the backdrop keeps the red background");
+    assert!(plain.iter().any(|(_, _, px)| bluish(px)), "the content raster keeps the blue shape");
+
+    // Grayscale: both images are gray, and the shape is still drawn (not dropped or white).
+    let gray = rgb_images(&export(&p, &PdfOptions { grayscale: true, ..opts(PageLayout::Slides) }).unwrap());
+    assert_eq!(gray.len(), plain.len(), "the same layers are written");
+    for (w, h, px) in &gray {
+        assert_eq!(px.len(), (*w as usize) * (*h as usize) * 3);
+        assert!(!coloured(px), "every pixel of every layer has R == G == B");
+    }
+    // Rec. 709 of (220, 30, 40) is 70 (backdrop); of (30, 60, 220) is 65 (content).
+    assert!(gray.iter().any(|(_, _, px)| px.as_chunks::<3>().0.iter().any(|c| c[0] == 70)), "the backdrop's red is its luminance");
+    assert!(gray.iter().any(|(_, _, px)| px.as_chunks::<3>().0.iter().any(|c| (64..=66).contains(&c[0]))), "the content's blue is its luminance");
+}
+
 /// A one-slide deck whose title text and whose shape both link out.
 fn linked_deck() -> Presentation {
     use deckcraft_model::text::{Action, Hyperlink};
