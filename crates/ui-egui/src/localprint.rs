@@ -3,7 +3,8 @@
 //! PDF to the spooler. The listing and the job run on their own threads: the UI thread only starts
 //! them and drains their channels.
 //!
-//! The printer list is read when the person first opens the destination list (not at start-up).
+//! The printer list is read when the person first opens the destination list (not at start-up),
+//! and again the first time it is opened after the Print page is shown anew.
 
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
@@ -120,7 +121,9 @@ impl Local {
     /// `scaling` is [`Scaling::Exact`] when the person chose the paper (the PDF is on it, and a
     /// queue that lacks it is refused), [`Scaling::ShrinkToFit`] when the pages are slide-shaped:
     /// no paper was asked for, so the job goes on the queue's own paper and the slide is fitted.
-    pub fn send(&mut self, printer: &str, title: &str, pdf: Vec<u8>, scaling: Scaling) -> bool {
+    /// `media` is the chosen paper as the spooler names it, sent as the job's `media` option (CUPS
+    /// takes it from there; `None` sends no paper).
+    pub fn send(&mut self, printer: &str, title: &str, pdf: Vec<u8>, scaling: Scaling, media: Option<&str>) -> bool {
         if self.job_rx.is_some() {
             return false;
         }
@@ -131,6 +134,7 @@ impl Local {
             grayscale: self.settings.grayscale,
             scaling,
             title: title.chars().filter(|c| !c.is_control()).take(100).collect(),
+            options: media.map(|m| vec![("media".to_owned(), m.to_owned())]).unwrap_or_default(),
             ..craft_print::Job::default()
         };
         let (tx, rx) = mpsc::channel();
@@ -256,32 +260,31 @@ mod tests {
     fn a_job_names_the_printer_when_it_works_and_when_it_does_not() {
         let mut local = Local::with(fake_list, fake_submit);
         local.settings.copies = 3;
-        assert!(local.send("Office Laser", "Quarterly\nreview", b"%PDF-1.7 fake".to_vec(), Scaling::Exact));
+        assert!(local.send("Office Laser", "Quarterly\nreview", b"%PDF-1.7 fake".to_vec(), Scaling::Exact, None));
         assert!(local.running());
-        assert!(!local.send("Front Desk", "x", b"%PDF".to_vec(), Scaling::Exact), "one job at a time");
+        assert!(!local.send("Front Desk", "x", b"%PDF".to_vec(), Scaling::Exact, None), "one job at a time");
         assert_eq!(wait(&mut local), "Sent to Office Laser: spooled 2 sheet(s), 3 copies");
         assert!(!local.running());
-        assert!(local.send("Front Desk", "x", b"%PDF".to_vec(), Scaling::Exact));
+        assert!(local.send("Front Desk", "x", b"%PDF".to_vec(), Scaling::Exact, None));
         assert_eq!(wait(&mut local), "Couldn't print to Front Desk: no such queue Front Desk");
     }
 
-    /// Says what scaling the job asked for, so a test can tell which one reached the spooler.
+    /// Says what scaling and driver options the job asked for, so a test can tell what reached the spooler.
     fn scaling_submit(_: &[u8], job: &craft_print::Job, _: &mut dyn FnMut(usize, usize)) -> Result<String, String> {
-        assert!(job.options.is_empty(), "no paper or other driver option is sent for the job");
-        Ok(format!("{:?}", job.scaling))
+        Ok(format!("{:?} {:?}", job.scaling, job.options))
     }
 
     #[test]
     fn a_slide_sized_job_is_fitted_to_the_queues_own_paper() {
         let mut local = Local::with(fake_list, scaling_submit);
-        assert!(local.send("Office Laser", "Deck", b"%PDF".to_vec(), Scaling::ShrinkToFit));
-        assert_eq!(wait(&mut local), "Sent to Office Laser: ShrinkToFit");
+        assert!(local.send("Office Laser", "Deck", b"%PDF".to_vec(), Scaling::ShrinkToFit, None));
+        assert_eq!(wait(&mut local), "Sent to Office Laser: ShrinkToFit []", "no paper or other driver option is sent");
     }
 
     #[test]
     fn a_chosen_paper_is_still_demanded_exactly() {
         let mut local = Local::with(fake_list, scaling_submit);
-        assert!(local.send("Office Laser", "Notes", b"%PDF".to_vec(), Scaling::Exact));
-        assert_eq!(wait(&mut local), "Sent to Office Laser: Exact");
+        assert!(local.send("Office Laser", "Notes", b"%PDF".to_vec(), Scaling::Exact, Some("A4")));
+        assert_eq!(wait(&mut local), r#"Sent to Office Laser: Exact [("media", "A4")]"#, "the paper is named, so CUPS doesn't use its default");
     }
 }

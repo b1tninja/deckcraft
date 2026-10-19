@@ -50,7 +50,7 @@ fn tiny_pdf() -> Vec<u8> {
 }
 
 fn send(app: &mut SlideApp) -> bool {
-    app.network_send("report.pdf", tiny_pdf(), 1, "A4")
+    app.network_send("report.pdf", tiny_pdf(), 1, "A4", Scaling::Exact)
 }
 
 #[test]
@@ -225,18 +225,20 @@ fn options_carry_only_what_was_requested() {
         media_size: Some("iso_a4_210x297mm".into()),
         expected_pages: Some(5),
     };
-    let (job, o) = options(&r, "a\u{7}b.pdf");
+    let (job, o) = options(&r, "a\u{7}b.pdf", Scaling::Exact);
     assert_eq!((job.copies, job.title.as_str(), job.duplex), (2, "ab.pdf", Some(Duplex::LongEdge)));
     assert_eq!(o.orientation, Some(Orientation::Landscape));
     assert_eq!(o.quality, Some(Quality::High));
     assert_eq!((o.colour, o.resolution), (ColourMode::Mono, Some(Resolution::new(600, 300))));
     assert_eq!((o.media.as_deref(), o.expected_pages), (Some("iso_a4_210x297mm"), Some(5)));
-    let (job, o) = options(&Request::default(), "");
-    assert_eq!((job.title, job.copies, job.duplex), (Job::default().title, 1, None));
+    let (job, o) = options(&Request::default(), "", Scaling::Exact);
+    assert_eq!((job.title, job.copies, job.duplex, job.scaling), (Job::default().title, 1, None, Scaling::Exact));
     assert_eq!(o, JobOptions::new());
     // Photo is craft-print's own quality now: it goes to the registry like the others.
-    let (_, o) = options(&Request { quality: Some(net::Quality::Photo), ..Request::default() }, "x");
+    let (_, o) = options(&Request { quality: Some(net::Quality::Photo), ..Request::default() }, "x", Scaling::Exact);
     assert_eq!(o.quality, Some(Quality::Photo));
+    // Slide-shaped pages are fitted to the printer's paper.
+    assert_eq!(options(&Request::default(), "x", Scaling::ShrinkToFit).0.scaling, Scaling::ShrinkToFit);
 }
 
 #[test]
@@ -322,6 +324,10 @@ mod ipp_fake {
         pub ops: Mutex<Vec<u16>>,
         pub document: Mutex<Option<Vec<u8>>>,
         pub formats: Vec<&'static str>,
+        /// `print-scaling-supported` and `print-scaling-default`, when the printer publishes them.
+        pub scaling: Option<(Vec<&'static str>, &'static str)>,
+        /// The `print-scaling` each Print-Job asked for (`None`: the request left it out).
+        pub scaling_sent: Mutex<Vec<Option<String>>>,
     }
 
     impl FakeIpp {
@@ -330,7 +336,13 @@ mod ipp_fake {
         }
 
         fn printer(&self) -> Group {
-            Group::new(GroupTag::Printer)
+            let group = match &self.scaling {
+                Some((supported, default)) => Group::new(GroupTag::Printer)
+                    .with(Attribute::keywords("print-scaling-supported", supported))
+                    .with(Attribute::keyword("print-scaling-default", default)),
+                None => Group::new(GroupTag::Printer),
+            };
+            group
                 .with(Attribute::name_value("printer-name", "Front desk"))
                 .with(Attribute::enumeration("printer-state", 3))
                 .with(Attribute::keyword("printer-state-reasons", "none"))
@@ -354,6 +366,12 @@ mod ipp_fake {
             self.ops.lock().expect("ops").push(message.code);
             if message.code == 0x0002 {
                 *self.document.lock().expect("document") = Some(message.data.clone());
+                let scaling = message.groups.iter().flat_map(|g| &g.attributes).find(|a| a.name == "print-scaling");
+                let keyword = scaling.and_then(|a| a.values.first()).map(|v| match v {
+                    Value::Keyword(k) => k.clone(),
+                    other => format!("{other:?}"),
+                });
+                self.scaling_sent.lock().expect("scaling").push(keyword);
             }
             let op = Group::new(GroupTag::Operation)
                 .with(Attribute::new("attributes-charset", Value::Charset("utf-8".into())))
@@ -418,5 +436,54 @@ fn an_ipp_printer_without_pdf_is_refused_before_a_job_exists() {
 #[test]
 fn the_colour_choice_is_called_grayscale() {
     assert_eq!(labels().color_monochrome, "Grayscale");
+    assert_eq!(labels().color_color, "Color", "US spelling, as everywhere in the interface");
     assert!(!labels().unsupported_color.contains("black and white"));
+}
+
+/// The layout decides the job's scaling: an IPP printer whose default is to fit is asked for
+/// `auto-fit` for slide-shaped pages (never `none`, which would print a 13.33 x 7.5 in slide cropped),
+/// while notes pages, laid out on the paper the person chose, print at their size.
+#[test]
+fn slides_are_fitted_on_a_network_printer_and_notes_print_exactly() {
+    let fake = Arc::new(ipp_fake::FakeIpp { scaling: Some((vec!["auto", "auto-fit", "fit", "fill", "none"], "auto")), ..ipp_fake::FakeIpp::new() });
+    let transport: Transport = fake.clone();
+    let mut app = app_with(transport);
+    app.net_print.state.draft = net::Draft::for_address("ipp://127.0.0.1:631/ipp/print");
+    query(&mut app);
+    let mut bs = crate::backstage::Backstage::new(crate::backstage::Page::Print, (1, Some(0)));
+    bs.print_dest = crate::print_dest::PrintDest::Network;
+    for layout in ["slides", "notes"] {
+        bs.print_layout = layout;
+        app.net_print.state.draft.confirmed = true;
+        assert!(crate::print_dest::send(&mut app, &bs, crate::backstage::print_params(&bs, &[0]), 1), "{layout}");
+        wait(&mut app, |a| !state(a).draft.running());
+        assert!(matches!(&state(&app).draft.job, JobView::Finished(r) if r.outcome == Outcome::Completed), "{:?}", state(&app).draft.job);
+    }
+    let sent = fake.scaling_sent.lock().unwrap().clone();
+    assert_eq!(sent, vec![Some("auto-fit".to_owned()), Some("none".to_owned())], "slides fit, notes are exact");
+}
+
+/// A job cancelled before the printer accepted it still names the printer.
+#[test]
+fn a_job_cancelled_before_it_is_accepted_names_the_printer() {
+    let (app, printer) = app(Config::default());
+    let transport = app.net_print.transport();
+    let address = net::normalize_url(ADDRESS);
+    let elements = Printer::open(&address, transport.clone()).unwrap().info().unwrap();
+    let name = summary(elements.clone()).name;
+    assert!(!name.is_empty());
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let (tx, _rx) = mpsc::channel();
+    let pdf = Arc::new(tiny_pdf());
+    let confirmed = UserConfirmed::attest(Some(true)).unwrap();
+    let job = options(&Request::default(), "x", Scaling::Exact);
+    let report = run_job(&address, transport.clone(), job, &pdf, Some(&elements), confirmed, &cancel, &tx, &None).unwrap();
+    assert_eq!((report.outcome, report.printer.as_str()), (Outcome::Canceled, name.as_str()));
+    assert_eq!(printer.jobs(), 0, "nothing was sent");
+    // Without a query to name it, the printer is its address.
+    let confirmed = UserConfirmed::attest(Some(true)).unwrap();
+    let job = options(&Request::default(), "x", Scaling::Exact);
+    let report = run_job(&address, transport, job, &pdf, None, confirmed, &cancel, &tx, &None).unwrap();
+    assert!(report.printer.contains("127.0.0.1"), "{report:?}");
 }

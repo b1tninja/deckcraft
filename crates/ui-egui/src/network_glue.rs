@@ -25,7 +25,7 @@ use std::time::Duration;
 use crate::netprint::wsd;
 use crate::netprint::{
     CancelToken, ColourMode, Document, Duplex, Elements, ErrorKind, Job, JobOptions, JobState, JobStatus, Orientation, Phase, PrintError, Printer,
-    Quality, Resolution, UserConfirmed, WaitPolicy, WatchOutcome, WatchStep,
+    Quality, Resolution, Scaling, UserConfirmed, WaitPolicy, WatchOutcome, WatchStep,
 };
 use craft_ui::capability::Capability;
 use craft_ui::printing::network::{
@@ -290,9 +290,11 @@ pub(crate) fn media_for_paper(paper: &str) -> Option<&'static str> {
 
 /// The job and its per-job options for the registry. `Photo` is craft-print's `Quality::Photo`: the
 /// backend maps it to the printer's own quality when the printer lists one and says so when it does not.
-fn options(request: &Request, job_name: &str) -> (Job, JobOptions) {
+/// `scaling` follows the Print page's layout ([`crate::print_dest`]): slide-shaped pages are fitted to
+/// the printer's paper, notes pages and handouts are on the paper the person chose and print exactly.
+fn options(request: &Request, job_name: &str, scaling: Scaling) -> (Job, JobOptions) {
     let name: String = job_name.chars().filter(|c| !c.is_control()).take(MAX_JOB_NAME).collect();
-    let mut job = Job::default();
+    let mut job = Job { scaling, ..Job::default() };
     if !name.trim().is_empty() {
         job.title = name;
     }
@@ -377,7 +379,7 @@ fn report(outcome: &WatchOutcome, printer: &str, warnings: &[String]) -> Report 
 /// The worker that sends the print-ready `pdf` and follows the job. `queried` is what the last query read of
 /// the printer, when it is the one addressed. Each
 /// call makes a new job, with the person's `confirmed` (never `interactive()`: it is the attestation
-/// of the ticked box, taken when Print was pressed).
+/// of the ticked box, taken when Print was pressed). `scaling`: see [`options`].
 pub(crate) fn send_job(
     transport: Option<Transport>,
     ctx: Option<egui::Context>,
@@ -385,6 +387,7 @@ pub(crate) fn send_job(
     pdf: Arc<Vec<u8>>,
     queried: Option<Elements>,
     confirmed: UserConfirmed,
+    scaling: Scaling,
 ) -> SendJob {
     Box::new(move |address: &str, request: Request| {
         let (result_tx, result_rx) = mpsc::channel();
@@ -393,7 +396,7 @@ pub(crate) fn send_job(
         let (address, transport, ctx) = (address.to_owned(), transport.clone(), ctx.clone());
         let (name, pdf, queried, worker_cancel) = (name.clone(), Arc::clone(&pdf), queried.clone(), cancel.clone());
         std::thread::spawn(move || {
-            let (job, options) = options(&request, &name);
+            let (job, options) = options(&request, &name, scaling);
             let result = run_job(&address, transport, (job, options), &pdf, queried.as_ref(), confirmed, &worker_cancel, &update_tx, &ctx);
             let _ = result_tx.send(result);
             repaint(&ctx);
@@ -423,7 +426,9 @@ fn run_job(
     let sent = match printer.submit(Document::pdf(pdf.as_slice()), job, options, confirmed, cancel, &mut |_| {}) {
         Ok(sent) => sent,
         Err(e) if e.kind() == ErrorKind::Cancelled => {
-            return Ok(Report { outcome: Outcome::Canceled, printer: String::new(), sheets: 0, notes: Vec::new() });
+            // The printer as the person was shown it: its name from the query, else its address.
+            let name = queried.map(|e| summary(e.clone()).name).filter(|n| !n.trim().is_empty()).unwrap_or_else(|| printer.address());
+            return Ok(Report { outcome: Outcome::Canceled, printer: name, sheets: 0, notes: Vec::new() });
         }
         Err(e) => return Err(failure(&e, false)),
     };
@@ -480,7 +485,7 @@ pub(crate) fn labels() -> Labels<'static> {
         high: "High",
         photo: "Photo",
         color: "Color:",
-        color_color: "Colour",
+        color_color: "Color",
         color_monochrome: "Grayscale",
         resolution: "Resolution:",
         resolution_dpi: "{dpi} dpi",
@@ -539,14 +544,15 @@ impl SlideApp {
 
     /// Send the print-ready `pdf` (of `page_count` sheets, the job's page count) to the
     /// queried printer, off the UI thread. It needs the person's confirmation, which it spends.
+    /// `scaling` comes from the layout: fitted for slide-shaped pages, exact for a chosen paper.
     /// Returns `true` when a job started.
-    pub(crate) fn network_send(&mut self, name: &str, pdf: Vec<u8>, page_count: usize, paper: &str) -> bool {
+    pub(crate) fn network_send(&mut self, name: &str, pdf: Vec<u8>, page_count: usize, paper: &str, scaling: Scaling) -> bool {
         let net = &mut self.net_print;
         let address = net.state.draft.normalized_url();
         // The attestation comes from the ticked box and nothing else.
         let Ok(confirmed) = UserConfirmed::attest(Some(net.state.draft.confirmed)) else { return false };
         let queried = crate::netprint::canonical(&address).ok().and_then(|a| net.queried(&a));
-        let send = send_job(net.transport(), net.ctx.clone(), name.to_owned(), Arc::new(pdf), queried, confirmed);
+        let send = send_job(net.transport(), net.ctx.clone(), name.to_owned(), Arc::new(pdf), queried, confirmed, scaling);
         let net = &mut self.net_print;
         // The sheets are the pages of the document sent: the total that progress shows until the printer reports one.
         net.state.draft.expected_pages = u32::try_from(page_count).ok();

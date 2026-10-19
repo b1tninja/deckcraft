@@ -25,8 +25,8 @@ use craft_print::wsd::error::Op;
 use craft_print::wsd::{Client, PrinterElements, PrinterUrl, WsdBackend};
 pub use craft_print::{
     CancelToken, ColourMode, Document, DocumentConverter, DocumentFormat, Duplex, ErrorKind, Job, JobId, JobOptions, JobSource, JobState, JobStatus,
-    JobWatch, Orientation, Phase, PrintError, PrinterDetails, Quality, Registry, Resolution, Submitted, UserConfirmed, WaitPolicy, WatchOutcome,
-    WatchStep,
+    JobWatch, Orientation, Phase, PrintError, PrinterDetails, Quality, Registry, Resolution, Scaling, Submitted, UserConfirmed, WaitPolicy,
+    WatchOutcome, WatchStep,
 };
 use craft_print::{SubmitRequest, namespaced_id};
 

@@ -54,13 +54,32 @@ fn media_paper(bs: &Backstage) -> &'static str {
     }
 }
 
-/// How a job to a local queue treats the page size. Full-page slides are slide-shaped (13.33 x 7.5 in
-/// for 16:9), a size no paper tray lists and nobody chose: they go on the queue's own paper, shrunk
-/// to fit and centred. Notes pages and handouts are laid out on the paper the person chose, which the
-/// queue must have: it is demanded exactly, so a driver that lacks it is refused, not guessed at.
+/// How a job to a local queue or a network printer treats the page size. Full-page slides are
+/// slide-shaped (13.33 x 7.5 in for 16:9), a size no paper tray lists and nobody chose: they go on the
+/// printer's own paper, shrunk to fit and centred (a network printer is asked for `auto-fit`, never
+/// `none`). Notes pages and handouts are laid out on the paper the person chose, which the queue must
+/// have: it is demanded exactly, so a driver that lacks it is refused, not guessed at.
 #[cfg(not(target_arch = "wasm32"))]
-fn local_scaling(bs: &Backstage) -> crate::localprint::Scaling {
+fn job_scaling(bs: &Backstage) -> crate::localprint::Scaling {
     if bs.print_layout == "slides" { crate::localprint::Scaling::ShrinkToFit } else { crate::localprint::Scaling::Exact }
+}
+
+/// The paper a job to a local queue asks for, as CUPS names it (`lp -o media=A4`): the one notes
+/// pages and handouts are laid out on, so a queue whose default is another size neither clips nor
+/// scales them. Slides name none (they are fitted, [`job_scaling`]). `cups`: the spooler is CUPS
+/// (Linux, macOS, BSD); the Windows spooler takes the paper from the PDF's pages instead.
+#[cfg(not(target_arch = "wasm32"))]
+fn local_media(bs: &Backstage, cups: bool) -> Option<&'static str> {
+    if !cups || bs.print_layout == "slides" {
+        return None;
+    }
+    Some(match bs.print_paper {
+        "letter" => "Letter",
+        "legal" => "Legal",
+        "a4" => "A4",
+        "a3" => "A3",
+        _ => return None,
+    })
 }
 
 /// Whether the pages should come out gray: the destination's Grayscale choice (a local queue's box,
@@ -116,6 +135,8 @@ pub fn destination(app: &mut SlideApp, ui: &mut Ui, bs: &mut Backstage, sheets_o
             app.local_print.load();
             if app.local_print.loading() {
                 ui.weak("Looking for printers…");
+            } else if app.local_print.printers.as_ref().is_some_and(Vec::is_empty) {
+                ui.weak("No printers found");
             }
             for name in app.local_print.printers.clone().unwrap_or_default() {
                 if ui.selectable_label(bs.print_dest == PrintDest::Local(name.clone()), &name).clicked() {
@@ -208,7 +229,7 @@ pub fn send(app: &mut SlideApp, bs: &Backstage, mut params: Value, slides: usize
             #[cfg(not(target_arch = "wasm32"))]
             {
                 let Some((title, bytes)) = app.print_bytes(&params) else { return false };
-                app.local_print.send(&printer, &title, bytes, local_scaling(bs))
+                app.local_print.send(&printer, &title, bytes, job_scaling(bs), local_media(bs, cfg!(not(windows))))
             }
             #[cfg(target_arch = "wasm32")]
             {
@@ -220,7 +241,7 @@ pub fn send(app: &mut SlideApp, bs: &Backstage, mut params: Value, slides: usize
             #[cfg(network_print)]
             {
                 let Some((title, bytes)) = app.print_bytes(&params) else { return false };
-                app.network_send(&title, bytes, sheet_count(bs.print_layout, slides), media_paper(bs))
+                app.network_send(&title, bytes, sheet_count(bs.print_layout, slides), media_paper(bs), job_scaling(bs))
             }
             #[cfg(not(network_print))]
             {
@@ -279,10 +300,26 @@ mod tests {
         use crate::localprint::Scaling;
         let mut bs = Backstage::new(crate::backstage::Page::Print, (1, Some(0)));
         bs.print_layout = "slides";
-        assert_eq!(local_scaling(&bs), Scaling::ShrinkToFit);
+        assert_eq!(job_scaling(&bs), Scaling::ShrinkToFit);
         for layout in ["notes", "h1", "h6"] {
             bs.print_layout = layout;
-            assert_eq!(local_scaling(&bs), Scaling::Exact, "{layout} is on the paper the person chose");
+            assert_eq!(job_scaling(&bs), Scaling::Exact, "{layout} is on the paper the person chose");
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_cups_job_names_the_chosen_paper_for_notes_and_handouts_only() {
+        let mut bs = Backstage::new(crate::backstage::Page::Print, (1, Some(0)));
+        bs.print_layout = "slides";
+        assert_eq!(local_media(&bs, true), None, "slides are fitted to the queue's own paper");
+        for (paper, media) in [("letter", "Letter"), ("a4", "A4"), ("legal", "Legal"), ("a3", "A3")] {
+            bs.print_paper = paper;
+            for layout in ["notes", "h1", "h6"] {
+                bs.print_layout = layout;
+                assert_eq!(local_media(&bs, true), Some(media), "{layout} on {paper}");
+                assert_eq!(local_media(&bs, false), None, "the Windows spooler takes the paper from the PDF");
+            }
         }
     }
 

@@ -1046,6 +1046,10 @@ fn print(app: &mut SlideApp, ui: &mut Ui, bs: &mut Backstage) {
                 bs.print_seen = true;
                 #[cfg(network_print)]
                 app.net_print.state.dialog_opened();
+                // The printers are read again when the list is next opened: one added (or a list
+                // that failed to load) shows up without restarting.
+                #[cfg(not(target_arch = "wasm32"))]
+                app.local_print.refresh();
             }
             heading(ui, "Printer");
             let ready = crate::print_dest::destination(app, ui, bs, ok);
