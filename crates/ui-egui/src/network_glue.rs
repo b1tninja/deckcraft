@@ -83,7 +83,7 @@ impl NetTasks {
         self.ctx = Some(ctx.clone());
         let query = self.query.get_or_insert_with(|| query_printer(transport, Some(ctx), queried));
         let host = net::Host { validate: &validate, query, sheets_ok, formats: FORMATS };
-        self.state.show(ui, egui::Id::new("network-printer"), &host, &labels())
+        self.state.show(ui, egui::Id::unique("network-printer"), &host, &labels())
     }
 }
 

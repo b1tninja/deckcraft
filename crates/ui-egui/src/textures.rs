@@ -52,6 +52,10 @@ pub struct Textures {
     /// Thumbnails by the slide's address and whether they are gray: a colour and a gray one of the
     /// same slide are different entries, so neither is ever shown for the other.
     thumbs: HashMap<(usize, bool), Entry>,
+    /// Thumbnails actually rendered, over the life of this cache. The number *held*
+    /// ([`Textures::thumb_count`]) cannot see a pane that renders the same rows over and over --
+    /// the cache thrash behind #969 -- because the count settles while the work does not.
+    thumb_renders: u64,
     /// SmartArt gallery pictures by layout, style and colours (and, for hover previews, the
     /// outline's hash).
     smartart: HashMap<String, TextureHandle>,
@@ -352,6 +356,12 @@ impl Textures {
         self.thumbs.len()
     }
 
+    /// How many thumbnails this cache has rendered, ever. A pane that is done asks for no more:
+    /// the number stops climbing, which is what tells a thrashing pane from a settled one.
+    pub fn thumb_renders(&self) -> u64 {
+        self.thumb_renders
+    }
+
     /// Force the canvas to re-render next time (fonts loaded, theme changed in place…).
     pub fn invalidate(&mut self) {
         self.canvas = None;
@@ -407,6 +417,7 @@ impl Textures {
         let (tw, th) = fit_size((width_px, h), max_side(ctx));
         let scale = tw as f64 / p.slide_size.width.max(1.0);
         let img = deckcraft_render::render_slide(p, index, &RenderOpts { scale, size: Some((tw, th)), threads: 0, ..Default::default() });
+        self.thumb_renders += 1;
         let tex = upload_editor(ctx, format!("thumb-{index}"), to_color_image(&img, gray));
         // Drop the old entry for this slide address; entries for slides that no longer exist age out.
         let region = key.want;
