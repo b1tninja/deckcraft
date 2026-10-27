@@ -124,7 +124,7 @@ pub fn destination(app: &mut SlideApp, ui: &mut Ui, bs: &mut Backstage, sheets_o
     };
     #[cfg(not(target_arch = "wasm32"))]
     app.local_print.set_ctx(ui.ctx());
-    let popup = egui::ComboBox::from_id_salt("backstage_print_dest").width(240.0).selected_text(shown).show_ui(ui, |ui| {
+    let popup = craft_ui::ComboBox::from_id_salt("backstage_print_dest").width(240.0).selected_text(shown).show_ui(ui, |ui| {
         let viewer_label = if desktop { "PDF viewer (choose the printer there)" } else { "PDF download" };
         if ui.selectable_label(bs.print_dest == PrintDest::Viewer, viewer_label).clicked() {
             bs.print_dest = PrintDest::Viewer;
@@ -169,7 +169,7 @@ pub fn destination(app: &mut SlideApp, ui: &mut Ui, bs: &mut Backstage, sheets_o
                         Some(crate::localprint::Duplex::LongEdge) => "Two-sided, flip on long edge",
                         Some(crate::localprint::Duplex::ShortEdge) => "Two-sided, flip on short edge",
                     };
-                    egui::ComboBox::from_id_salt("backstage_print_sides").width(240.0).selected_text(sides).show_ui(ui, |ui| {
+                    craft_ui::ComboBox::from_id_salt("backstage_print_sides").width(240.0).selected_text(sides).show_ui(ui, |ui| {
                         for (value, label) in [
                             (None, "Printer's default"),
                             (Some(crate::localprint::Duplex::Off), "One-sided"),
