@@ -77,9 +77,9 @@ impl SlideApp {
             integrated_titlebar: false,
             backstage: None,
             #[cfg(network_print)]
-            net_print: network_glue::NetTasks::default(),
+            net_print: super::network_glue::NetTasks::default(),
             #[cfg(not(target_arch = "wasm32"))]
-            local_print: localprint::Local::default(),
+            local_print: super::localprint::Local::default(),
             pending_urls: vec![],
             #[cfg(not(target_arch = "wasm32"))]
             updates_rt: updates_ui::Runtime::default(),
